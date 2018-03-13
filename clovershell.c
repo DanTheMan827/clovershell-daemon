@@ -21,7 +21,6 @@
 #include <signal.h>
 #include <time.h>
 
-#define DEVICE_PATH "/dev/usb_clover"
 char* cmd = "/bin/su";
 char* arg0 = "su";
 char* arg1 = "root";
@@ -74,8 +73,6 @@ struct exec_connection
 struct shell_connection* shell_connections[MAX_SHELL_CONNECTIONS];
 struct exec_connection* exec_connections[MAX_EXEC_CONNECTIONS];
 
-int u = 0;
-
 void error(char* err)
 {
     perror(err);
@@ -84,7 +81,6 @@ void error(char* err)
 
 void sig_handler(int signo)
 {
-    if (u) close(u);
     exit(0);
 }
 
@@ -92,7 +88,7 @@ void write_usb(char* data, int len)
 {
     while (len > 0)
     {
-	int l = write(u, data, len);
+	int l = write(STDOUT_FILENO, data, len);
 	if (l >= 0)
 	{
 	    data += l;
@@ -119,12 +115,11 @@ void shell_read_thread(struct shell_connection* c, int id)
 	    *((uint16_t*)&buff[2]) = l;
 	    write_usb(buff, l+4);
 	} else { // end of session
-	    printf("tty %d(%s) eof\n", id, c->fds);
+	    fprintf(stderr, "tty %d(%s) eof\n", id, c->fds);
 	    buff[0] = CMD_SHELL_CLOSED;
 	    buff[1] = id;
 	    buff[2] = buff[3] = 0;
 	    write_usb(buff, 4);
-	    close(u);
 	    exit(0);
 	}
     }
@@ -138,7 +133,7 @@ void shell_new_connection()
             break;
     if (id >= MAX_SHELL_CONNECTIONS)
     {
-        printf("too many shell connections\n");
+        fprintf(stderr, "too many shell connections\n");
         return;
     }
     shell_connections[id] = malloc(sizeof(struct shell_connection));
@@ -149,7 +144,7 @@ void shell_new_connection()
     if (grantpt(c->fdm)) error("grantpt");
     if (unlockpt(c->fdm)) error("unlockpt");
     ptsname_r(c->fdm, c->fds, sizeof(c->fds));
-    printf("created %d(%s)\n", id, c->fds);
+    fprintf(stderr, "created %d(%s)\n", id, c->fds);
 
     char buff[4];
     buff[0] = CMD_SHELL_NEW_RESP;
@@ -160,7 +155,6 @@ void shell_new_connection()
     // starting getty
     if (!(c->shell_pid = fork()))
     {
-        close(u);
         close(c->fdm);
         char g[128];
         sprintf(g, LOGIN_PROG, c->fds);
@@ -178,12 +172,12 @@ void shell_data(int id, char* data, uint16_t len)
     struct shell_connection* c = shell_connections[id];
     if (!c)
     {
-	printf("invalid id: %d\n", id);
+	fprintf(stderr, "invalid id: %d\n", id);
 	return;
     }
     if (write(c->fdm, data, len) < 0)
     {
-	printf("fdm %d(%s) write error\n", id, c->fds);
+	fprintf(stderr, "fdm %d(%s) write error\n", id, c->fds);
 	if (c->shell_pid) kill(c->shell_pid, SIGKILL);
 	if (c->reading_pid) kill(c->reading_pid, SIGKILL);
 	exit(0);
@@ -258,14 +252,14 @@ void exec_new_connection(char* cmd, uint16_t len)
 	    break;
     if (id >= MAX_EXEC_CONNECTIONS)
     {
-        printf("too many shell connections\n");
+        fprintf(stderr, "too many shell connections\n");
         return;
     }
     exec_connections[id] = malloc(sizeof(struct exec_connection));
     memset(exec_connections[id], 0, sizeof(struct exec_connection));
     struct exec_connection* c = exec_connections[id];
 
-    printf("executing %s\n", cmd);
+    fprintf(stderr, "executing %s\n", cmd);
 
     char buff[1024];
     buff[0] = CMD_EXEC_NEW_RESP;
@@ -309,8 +303,7 @@ void exec_new_connection(char* cmd, uint16_t len)
 	*((uint16_t*)&buff[2]) = sizeof(ret);
 	*((int*)&buff[4]) = ret;
 	write_usb(buff, 4+sizeof(ret));
-        close(u);
-	exit(0);
+        exit(0);
     }
 
     close(c->stdin[0]); // unused in this thread
@@ -325,7 +318,7 @@ void send_pipe_stats(int id)
     struct exec_connection* c = exec_connections[id];
     if (!c)
     {
-	printf("invalid id: %d\n", id);
+	fprintf(stderr, "invalid id: %d\n", id);
 	return;
     }
     int32_t queued;
@@ -338,7 +331,7 @@ void send_pipe_stats(int id)
     *((uint16_t*)&buff[2]) = 8;
     *((int32_t*)&buff[4]) = queued;
     *((int32_t*)&buff[8]) = pipe_size;
-    write(u, buff, sizeof(buff));
+    write(STDOUT_FILENO, buff, sizeof(buff));
 }
 
 void exec_stdin(int id, char* data, uint16_t len)
@@ -346,7 +339,7 @@ void exec_stdin(int id, char* data, uint16_t len)
     struct exec_connection* c = exec_connections[id];
     if (!c)
     {
-	printf("invalid id: %d\n", id);
+	fprintf(stderr, "invalid id: %d\n", id);
 	return;
     }
     if (len > 0)
@@ -371,7 +364,7 @@ void cleanup()
 	struct shell_connection* c = shell_connections[id];
 	if (c)
 	{
-	    //printf("Checking shell %d\n", id);
+	    //fprintf(stderr, "Checking shell %d\n", id);
 	    char dead = 1;
 	    if (c->reading_pid && (waitpid(c->reading_pid, NULL, WNOHANG) == 0))
 		dead = 0;
@@ -383,7 +376,7 @@ void cleanup()
 		c->shell_pid = 0;
 	    if (dead)
 	    {
-		printf("cleaning %d shell connection\n", id);
+		fprintf(stderr, "cleaning %d shell connection\n", id);
 		close(c->fdm);
 		free(c);
 		shell_connections[id] = NULL;
@@ -395,7 +388,7 @@ void cleanup()
 	struct exec_connection* c = exec_connections[id];
 	if (c)
 	{
-	    //printf("Checking exec %d\n", id);
+	    //fprintf(stderr, "Checking exec %d\n", id);
 	    char dead = 1;
 	    if (c->exec_wait_pid && (waitpid(c->exec_wait_pid, NULL, WNOHANG) == 0))
 		dead = 0;
@@ -407,7 +400,7 @@ void cleanup()
 		c->exec_pid = 0;
 	    if (dead)
 	    {
-		printf("cleaning %d exec connection\n", id);
+		fprintf(stderr, "cleaning %d exec connection\n", id);
 		close(c->stdin[1]);
 		free(c);
 		exec_connections[id] = NULL;
@@ -426,7 +419,7 @@ void shell_kill(int id)
     if (c->reading_pid) kill(c->reading_pid, SIGKILL);
     //free(shell_connections[id]);
     //shell_connections[id] = NULL;
-    printf("shell session %d killed\n", id);
+    fprintf(stderr, "shell session %d killed\n", id);
 }
 
 void shell_kill_all()
@@ -446,7 +439,7 @@ void exec_kill(int id)
     if (c->exec_wait_pid) kill(c->exec_wait_pid, SIGKILL);
     //free(exec_connections[id]);
     //exec_connections[id] = NULL;
-    printf("exec session %d killed\n", id);
+    fprintf(stderr, "exec session %d killed\n", id);
 }
 
 void exec_kill_all()
@@ -459,7 +452,7 @@ void exec_kill_all()
 
 int main(int argc, char **argv)
 {
-    printf("clovershell (c) cluster, 2017 (built time: %s %s)\n", __DATE__, __TIME__);
+    fprintf(stderr, "clovershell (c) cluster, 2017 (built time: %s %s)\n", __DATE__, __TIME__);
     int i;
     for(i = 0; i < MAX_SHELL_CONNECTIONS; i++)
 	shell_connections[i] = NULL;
@@ -467,9 +460,7 @@ int main(int argc, char **argv)
 	exec_connections[i] = NULL;
 
     if (signal(SIGTERM, sig_handler) == SIG_ERR) error("SIGTERM");
-    u = open(DEVICE_PATH, O_RDWR|O_NOCTTY|O_DSYNC);
-    if (u < 0) error("usb open");
-
+    
     char buff[READ_BUFFER_SIZE];
     time_t clean_time = time(NULL);
 
@@ -478,24 +469,24 @@ int main(int argc, char **argv)
 
     while (1)
     {	
-	long int l = read(u, buff, sizeof(buff));
+	long int l = read(STDIN_FILENO, buff, sizeof(buff));
 	if (l <= 0)
 	    error("usb eof");
 	char cmd = buff[0];
 	char arg = buff[1];
 	uint16_t len = *((uint16_t*)&buff[2]);
-	//printf("cmd=%d, arg=%d, len=%d\n", cmd, arg, len);
+	//fprintf(stderr, "cmd=%d, arg=%d, len=%d\n", cmd, arg, len);
 	char* data = &buff[4];
 	if (len + 4 != l)
 	{
-	    //printf("invalid size: %d != %d\n", l, len);
+	    //fprintf(stderr, "invalid size: %d != %d\n", l, len);
 	    continue;
 	}
 
 	switch (cmd)
 	{
 	    case CMD_PING:
-		printf("PING? PONG!\n");
+		fprintf(stderr, "PING? PONG!\n");
 		buff[0] = CMD_PONG;
 		write_usb(buff, l);
 		break;
@@ -529,7 +520,7 @@ int main(int argc, char **argv)
 	}
 	if (time(NULL) - clean_time > CLEANUP_INTERVAL)
 	{
-	    //printf("Cleaing up\n");
+	    //fprintf(stderr, "Cleaing up\n");
 	    cleanup();
 	    clean_time = time(NULL);
 	}
